@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Visualizador 3D</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #1e1e2a; overflow: hidden; font-family: system-ui, sans-serif; }
+    canvas { display: block; }
+    #panel { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+    #panel button {
+      position: absolute; transform: translate(-50%, -100%); pointer-events: auto; white-space: nowrap;
+      padding: 6px 12px; border: 0; border-radius: 16px; cursor: pointer;
+      font-size: 13px; color: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.5);
+    }
+    #panel button.on  { background: #2e9e5b; }
+    #panel button.off { background: #555; }
+    #overlay { position: fixed; top: 0; right: 0; bottom: 0; padding: 16px; box-sizing: border-box; pointer-events: none; display: none; align-items: center; z-index: 10; }
+    #overlay.open { display: flex; }
+    #modal { pointer-events: auto; background: rgba(42,42,58,.95); color: #e8e8f0; width: min(420px, 90vw); max-height: 90vh; overflow-y: auto; border-radius: 12px; padding: 24px 28px; position: relative; box-shadow: 0 10px 40px rgba(0,0,0,.6); line-height: 1.5; }
+    #modal h2 { margin: 0 0 2px; font-size: 22px; }
+    #modal .year { color: #8fd1a6; font-size: 14px; margin-bottom: 14px; }
+    #modal p { margin: 0 0 12px; font-size: 14.5px; }
+    #modal ul { margin: 0 0 14px; padding-left: 20px; font-size: 14px; }
+    #modal #close { position: absolute; top: 10px; right: 14px; background: none; border: 0; color: #aab; font-size: 26px; cursor: pointer; }
+    #modal #power { padding: 8px 14px; border: 0; border-radius: 6px; cursor: pointer; color: #fff; font-size: 14px; }
+    #credits { position: absolute; bottom: 12px; right: 12px; color: #889; font-size: 12px; z-index: 5; max-width: 45vw; text-align: right; }
+    #credits a { color: #9bd; }
+    #hint { position: absolute; bottom: 12px; left: 12px; color: #aab; font-size: 13px; }
+  </style>
+  <script type="importmap">
+    { "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    } }
+  </script>
+</head>
+<body>
+  <div id="panel"></div>
+  <div id="hint">Clique em um PC para ver sua história. Use os botões para ligar/desligar. Arraste para girar, scroll para zoom.</div>
+  <div id="credits">
+    Modelo 3D: <a href="https://sketchfab.com/3d-models/80s-90s-computer-pack-cartoon-stylized-6b45ad8c7d1d44f0987acb54c46975cd" target="_blank" rel="noopener">"80s / 90s Computer Pack - Cartoon Stylized"</a>
+    por <a href="https://sketchfab.com/TheAlex" target="_blank" rel="noopener">TheAlex</a>,
+    licença <a href="http://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>
+  </div>
+  <div id="overlay"><div id="modal">
+    <button id="close" aria-label="Fechar">&times;</button>
+    <h2 id="m-title"></h2><div class="year" id="m-year"></div>
+    <div id="m-body"></div>
+    <button id="power"></button>
+  </div></div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+    import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(devicePixelRatio);
+    renderer.setSize(innerWidth, innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x1e1e2a);
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+
+    const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 1000);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // PC -> lista de meshes. Cada PC recebe um clone próprio do material.
+    const PCS = { desktop: [], tower: [], ibm: [], mac: [] };
+    const screens = [];
+    const state = {};
+    const buttons = {};
+    const anchors = {};
+    const boxes = {};
+    let home = null;
+    let tween = null;
+    let shift = 0;
+
+    // Anima a câmera até uma posição/alvo
+    function flyTo(pos, target) {
+      tween = { t: 0, p0: camera.position.clone(), t0: controls.target.clone(), p1: pos, t1: target };
+    }
+    function zoomToPc(key) {
+      const box = boxes[key];
+      const c = box.getCenter(new THREE.Vector3());
+      const radius = box.getSize(new THREE.Vector3()).length() / 2;
+      const dist = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov) / 2) * 0.9;
+      const dir = camera.position.clone().sub(controls.target).normalize();
+      flyTo(c.clone().addScaledVector(dir, dist), c);
+    }
+
+    new GLTFLoader().load('/models/computer.glb', (gltf) => {
+      const model = gltf.scene;
+      scene.add(model);
+      model.updateMatrixWorld(true);
+
+      model.traverse((o) => {
+        if (!o.isMesh) return;
+        const name = (o.parent?.name || o.name).toLowerCase();
+        const key = name.match(/^(desktop|tower|ibm|mac)/)?.[1];
+        if (key) PCS[key].push(o);
+        else if (name.startsWith('screen')) screens.push(o);
+      });
+
+      // screen1 = tela do Windows 95 (desktop), screen2 = tela do Windows XP (tower)
+      const SCREEN_OWNER = { screen1: 'desktop', screen2: 'tower' };
+      for (const s of screens) PCS[SCREEN_OWNER[s.parent.name.toLowerCase().match(/^screen\d/)[0]]].push(s);
+
+      // Região de cada tela no atlas de textura (1024x1024, origem no topo)
+      const SCREEN_RECT = {
+        mac:     [25, 22, 247, 166],
+        desktop: [305, 8, 233, 164],
+        tower:   [562, 8, 216, 162],
+        ibm:     [810, 8, 187, 164],
+      };
+      // Malha que contém a tela de cada PC
+      const SCREEN_MESH = {
+        ibm: PCS.ibm.find(m => m.parent.name === 'ibm'),
+        mac: PCS.mac.find(m => m.parent.name === 'mac'),
+        desktop: screens.find(m => m.parent.name === 'screen1'),
+        tower: screens.find(m => m.parent.name === 'screen2'),
+      };
+
+      for (const [key, meshes] of Object.entries(PCS)) {
+        for (const m of meshes) m.userData.pc = key;
+        const sm = SCREEN_MESH[key];
+        const mat = sm.material.clone();
+        const onMap = mat.map;
+        // Textura "desligada": mesma textura, mas com a região da tela escura
+        const img = onMap.image;
+        const k = img.width / 1024;
+        const cv = document.createElement('canvas');
+        cv.width = img.width; cv.height = img.height;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const [x, y, w, h] = SCREEN_RECT[key].map(v => v * k);
+        ctx.fillStyle = '#0b0e0c';
+        ctx.fillRect(x, y, w, h);
+        const offMap = new THREE.CanvasTexture(cv);
+        offMap.flipY = false;
+        offMap.colorSpace = onMap.colorSpace;
+        offMap.wrapS = onMap.wrapS; offMap.wrapT = onMap.wrapT;
+        offMap.anisotropy = onMap.anisotropy;
+        mat.userData = { onMap, offMap, baseEmissive: mat.emissiveIntensity };
+        sm.material = mat;
+        PCS[key].screenMat = mat;
+
+        state[key] = true;
+        // Âncora 3D: topo do conjunto carcaça + tela
+        const box = new THREE.Box3();
+        for (const m of meshes) if (m.parent.name === key || m === sm) box.expandByObject(m);
+        const top = box.getCenter(new THREE.Vector3());
+        top.y = box.max.y;
+        anchors[key] = top;
+        boxes[key] = box;
+        const b = document.createElement('button');
+        b.onclick = () => toggle(key);
+        document.getElementById('panel').appendChild(b);
+        buttons[key] = b;
+        render(key);
+      }
+
+      // Enquadra a câmera
+      const box = new THREE.Box3().setFromObject(model);
+      const size = box.getSize(new THREE.Vector3()).length();
+      const c = box.getCenter(new THREE.Vector3());
+      controls.target.copy(c);
+      camera.position.copy(c).add(new THREE.Vector3(size * 0.5, size * 0.4, size * 0.8));
+      camera.near = size / 100; camera.far = size * 100; camera.updateProjectionMatrix();
+      home = { pos: camera.position.clone(), target: controls.target.clone() };
+    });
+
+    const LABEL = { ibm: 'IBM 3178', mac: 'Apple SE', desktop: 'Windows 95 PC', tower: 'Windows XP PC' };
+
+    const INFO = {
+      ibm: {
+        title: 'IBM 3178 Coax Terminal', year: '1983–1984',
+        body: `<p>O IBM 3178 foi um terminal da família 3270, os famosos terminais "tela verde" usados para acessar mainframes IBM. Foi lançado como uma alternativa menor e mais barata ao popular 3278, para equipar grandes escritórios, bancos e órgãos públicos.</p>
+        <ul>
+          <li><b>Terminal "burro":</b> não executava programas; guardava a tela em memória local e enviava ao mainframe um bloco de dados por vez, poupando o processador central.</li>
+          <li><b>Cabo coaxial:</b> ligava-se a uma unidade controladora (IBM 3274/3174), que atendia dezenas de terminais.</li>
+          <li><b>Tela:</b> CRT monocromático, geralmente verde, com 24 linhas × 80 colunas.</li>
+          <li><b>Teclado:</b> teclas PF (Program Function) próprias do ecossistema 3270.</li>
+        </ul>
+        <p>Com a chegada das redes TCP/IP e dos emuladores TN3270 nos anos 90, os terminais físicos sumiram, mas o protocolo 3270 ainda roda em sistemas de bancos, seguradoras e companhias aéreas.</p>`
+      },
+      mac: {
+        title: 'Apple Macintosh SE', year: '1987',
+        body: `<p>Lançado em 2 de março de 1987, junto com o Macintosh II, o SE (de "System Expansion") foi o primeiro Mac compacto expansível. Steve Jobs sempre defendeu um Mac fechado, mas, após sua saída da Apple em 1985, a empresa passou a apostar em máquinas atualizáveis.</p>
+        <ul>
+          <li><b>Processador:</b> Motorola 68000 de 8 MHz.</li>
+          <li><b>Tela:</b> CRT monocromático de 9", resolução 512 × 342.</li>
+          <li><b>Memória:</b> 1 MB de RAM, expansível até 4 MB.</li>
+          <li><b>Armazenamento:</b> primeiro Mac compacto com baia interna para disco rígido SCSI de 20 ou 40 MB.</li>
+          <li><b>Slot de expansão (SE PDS):</b> aceitava placas aceleradoras, de rede e de compatibilidade.</li>
+          <li><b>ADB:</b> estreou o Apple Desktop Bus para teclado e mouse.</li>
+          <li><b>Visual:</b> cor cinza "Platinum" e ventoinha interna.</li>
+        </ul>
+        <p>Preço de lançamento: cerca de US$ 2.900 (dois disquetes) e US$ 3.900 (com disco rígido). Foi vendido até 1989 e sucedido pelo SE/30 e pelo Macintosh Classic.</p>`
+      },
+      desktop: {
+        title: 'Windows 95 PC (genérico)', year: '1995',
+        body: `<p>O Windows 95 foi lançado em 24 de agosto de 1995 (nome de código "Chicago"), com uma campanha de cerca de US$ 300 milhões, a música "Start Me Up" dos Rolling Stones e o Empire State Building iluminado com as cores do Windows. Vendeu mais de 7 milhões de cópias nas primeiras cinco semanas.</p>
+        <ul>
+          <li><b>Botão Iniciar e barra de tarefas:</b> substituíram o confuso Gerenciador de Programas do Windows 3.1.</li>
+          <li><b>32 bits e multitarefa preemptiva:</b> mais estabilidade, embora ainda dependesse do MS-DOS para iniciar.</li>
+          <li><b>Plug and Play:</b> detecção automática de hardware.</li>
+          <li><b>Nomes longos de arquivo:</b> fim do limite 8.3 do DOS.</li>
+          <li><b>Lixeira e atalhos</b> na área de trabalho, e depois o Internet Explorer.</li>
+        </ul>
+        <p>Foi o marco que levou o computador pessoal gráfico às massas e definiu a lógica do menu Iniciar usada até hoje.</p>`
+      },
+      tower: {
+        title: 'Windows XP PC (genérico)', year: '2001',
+        body: `<p>O Windows XP (nome de código "Whistler") foi concluído em 24 de agosto de 2001 e lançado em 25 de outubro de 2001. Unificou as duas linhas da Microsoft: a doméstica (95/98/Me), instável, e a corporativa (NT/2000), levando o robusto kernel NT para usuários comuns.</p>
+        <ul>
+          <li><b>Interface Luna:</b> barra de tarefas azul, botão Iniciar verde e janelas arredondadas.</li>
+          <li><b>Estabilidade:</b> as telas azuis ficaram bem mais raras.</li>
+          <li><b>Multimídia e rede:</b> Windows Media Player 8, Internet Explorer 6, gravação de CD e assistente de rede.</li>
+          <li><b>Ativação de produto:</b> estreou a ativação, que ligava a chave ao hardware do PC, algo bastante criticado.</li>
+          <li><b>Bliss:</b> o papel de parede da colina verde de Napa Valley virou uma das fotos mais vistas da história.</li>
+        </ul>
+        <p>Teve edições Home e Professional e uma longevidade enorme: o suporte estendido só terminou em 8 de abril de 2014.</p>`
+      }
+    };
+
+    let current = null;
+    const overlay = document.getElementById('overlay');
+    function openInfo(key) {
+      current = key;
+      const i = INFO[key];
+      document.getElementById('m-title').textContent = i.title;
+      document.getElementById('m-year').textContent = i.year;
+      document.getElementById('m-body').innerHTML = i.body;
+      overlay.classList.add('open');
+      zoomToPc(key);
+      renderPower();
+    }
+    function closeInfo() {
+      overlay.classList.remove('open');
+      if (home) flyTo(home.pos, home.target);
+    }
+    function renderPower() {
+      const p = document.getElementById('power');
+      const on = state[current];
+      p.textContent = on ? 'Desligar' : 'Ligar';
+      p.style.background = on ? '#a33' : '#2e9e5b';
+    }
+    document.getElementById('power').onclick = () => { toggle(current); };
+    document.getElementById('close').onclick = closeInfo;
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) closeInfo(); });
+    addEventListener('keydown', (e) => { if (e.key === 'Escape' && overlay.classList.contains('open')) closeInfo(); });
+
+    function render(key) {
+      const on = state[key];
+      const mat = PCS[key].screenMat;
+      // Só a tela apaga: troca a textura pela versão escura e zera o brilho emissivo
+      mat.map = on ? mat.userData.onMap : mat.userData.offMap;
+      mat.emissiveIntensity = on ? mat.userData.baseEmissive : 0;
+      mat.needsUpdate = true;
+      buttons[key].textContent = `${LABEL[key]}: ${on ? 'ligado' : 'desligado'}`;
+      buttons[key].className = on ? 'on' : 'off';
+    }
+    function toggle(key) { state[key] = !state[key]; render(key); if (key === current) renderPower(); }
+
+    // Clique no modelo
+    const ray = new THREE.Raycaster();
+    let down;
+    renderer.domElement.addEventListener('pointerdown', (e) => down = [e.clientX, e.clientY]);
+    renderer.domElement.addEventListener('pointerup', (e) => {
+      if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return; // foi arrasto
+      ray.setFromCamera(new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1), camera);
+      const hit = ray.intersectObjects(Object.values(PCS).flat(), false)[0];
+      if (hit) openInfo(hit.object.userData.pc);
+    });
+
+    addEventListener('resize', () => {
+      camera.aspect = innerWidth / innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(innerWidth, innerHeight);
+    });
+    const tmp = new THREE.Vector3();
+    renderer.setAnimationLoop(() => {
+      if (tween) {
+        tween.t = Math.min(1, tween.t + 0.025);
+        const e = 1 - Math.pow(1 - tween.t, 3); // ease-out
+        camera.position.lerpVectors(tween.p0, tween.p1, e);
+        controls.target.lerpVectors(tween.t0, tween.t1, e);
+        if (tween.t >= 1) tween = null;
+      }
+      controls.update();
+      // Desloca a imagem para a esquerda enquanto o painel está aberto, para o PC não ficar atrás dele
+      const wantShift = overlay.classList.contains('open') && innerWidth > 700 ? 226 : 0;
+      shift += (wantShift - shift) * 0.1;
+      if (Math.abs(shift) < 0.5 && wantShift === 0) { shift = 0; camera.clearViewOffset(); }
+      else camera.setViewOffset(innerWidth, innerHeight, shift, 0, innerWidth, innerHeight);
+      renderer.render(scene, camera);
+      // Posiciona os botões flutuando sobre cada PC
+      for (const [key, pos] of Object.entries(anchors)) {
+        tmp.copy(pos).project(camera);
+        const b = buttons[key];
+        b.style.display = tmp.z > 1 ? 'none' : 'block';
+        b.style.left = ((tmp.x + 1) / 2 * innerWidth) + 'px';
+        b.style.top = ((1 - tmp.y) / 2 * innerHeight - 8) + 'px';
+      }
+    });
+  </script>
+</body>
+</html>
